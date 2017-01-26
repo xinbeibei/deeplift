@@ -12,12 +12,16 @@ from deeplift.blobs import DenseMxtsMode
 import theano
 import keras
 from keras import models
-from keras import backend as K
 
 
 class TestBatchNorm(unittest.TestCase):
 
     def setUp(self):
+        if (hasattr(keras, '__version__')==False):
+            self.keras_version = 0.2 #didn't have the __version__ tag
+            assert False, "keras batch norm was buggy in 0.2 so no test for it"
+        else:
+            self.keras_version = float(keras.__version__[0:3])
          
         self.inp = np.arange(16).reshape(2,2,2,2)
         self.keras_model = keras.models.Sequential()
@@ -26,6 +30,7 @@ class TestBatchNorm(unittest.TestCase):
         self.beta = np.array([4.0, 5.0])
         self.mean = np.array([3.0, 3.0])
         self.std = np.array([4.0, 9.0])
+        from keras import backend as K
         k_backend = K._BACKEND
         if (k_backend=="theano"):
             self.axis=1
@@ -35,7 +40,6 @@ class TestBatchNorm(unittest.TestCase):
             raise RuntimeError("Unsupported backend: "+str(k_backend))
         batch_norm_layer = keras.layers.normalization.BatchNormalization(
                            axis=self.axis, input_shape=(2,2,2))
-
         self.keras_model.add(batch_norm_layer)
         batch_norm_layer.set_weights(np.array([
                                       self.gamma, #gamma (scaling)
@@ -48,36 +52,64 @@ class TestBatchNorm(unittest.TestCase):
         dense_layer.set_weights([np.ones((1,8)).T, np.zeros(1)])
         self.keras_model.compile(loss="mse", optimizer="sgd")
 
-        keras_batchnorm_fprop_func = theano.function(
-                        [self.keras_model.layers[0].input],        
-                         self.keras_model.layers[0].get_output(train=False),    
-                         allow_input_downcast=True)
-        self.keras_batchnorm_fprop_func = theano.function(
-                            [self.keras_model.layers[0].input],
-                            self.keras_model.layers[0].get_output(train=False),
-                            allow_input_downcast=True) 
-        self.keras_output_fprop_func = theano.function(
+        if (self.keras_version <= 0.3): 
+            self.keras_batchnorm_fprop_func = theano.function(
+                        [self.keras_model.layers[0].input],
+                        self.keras_model.layers[0].get_output(train=False),
+                        allow_input_downcast=True) 
+            self.keras_output_fprop_func = theano.function(
                         [self.keras_model.layers[0].input],
                         self.keras_model.layers[-1].get_output(train=False),
                         allow_input_downcast=True)
-
-        grad = theano.grad(theano.tensor.sum(
+            grad = theano.grad(theano.tensor.sum(
                    self.keras_model.layers[-1].get_output(train=False)[:,0]),
                    self.keras_model.layers[0].input)
-        self.grad_func = theano.function(
-                         [self.keras_model.layers[0].input],
-                         grad, allow_input_downcast=True)
+            self.grad_func = theano.function(
+                             [self.keras_model.layers[0].input],
+                             grad, allow_input_downcast=True)
+        else:
+            keras_batchnorm_fprop_func = theano.function(
+                        [self.keras_model.layers[0].input,
+                         keras.backend.learning_phase()],
+                        self.keras_model.layers[0].output,
+                        allow_input_downcast=True,
+                        on_unused_input='ignore') 
+            self.keras_batchnorm_fprop_func = (
+                lambda x: keras_batchnorm_fprop_func(x, False))
+            keras_output_fprop_func = theano.function(
+                        [self.keras_model.layers[0].input,
+                         keras.backend.learning_phase()],
+                        self.keras_model.layers[-1].output,
+                        allow_input_downcast=True,
+                        on_unused_input='ignore')
+            self.keras_output_fprop_func = (
+                lambda x: keras_output_fprop_func(x, False))
+            grad = theano.grad(theano.tensor.sum(
+                   self.keras_model.layers[-1].output[:,0]),
+                   self.keras_model.layers[0].input)
+            grad_func = theano.function(
+                   [self.keras_model.layers[0].input,
+                    keras.backend.learning_phase()],
+                   grad, allow_input_downcast=True,
+                   on_unused_input='ignore')
+            self.grad_func = (lambda x: grad_func(x, False))
 
 
     def prepare_batch_norm_deeplift_model(self, axis):
         self.input_layer = blobs.Input(num_dims=None, shape=(None,2,2,2))
+        if (self.keras_version <= 0.3):
+            std = self.std
+            epsilon = self.epsilon
+        else:
+            std = np.sqrt(self.std+self.epsilon)
+            epsilon = 0
         self.batch_norm_layer = blobs.BatchNormalization(
                                  gamma=self.gamma,
                                  beta=self.beta,
                                  axis=axis,
                                  mean=self.mean,
-                                 std=self.std,
-                                 epsilon=self.epsilon)
+                                 std=std,
+                                 epsilon=epsilon)
         self.batch_norm_layer.set_inputs(self.input_layer)
         self.flatten_layer = blobs.Flatten()
         self.flatten_layer.set_inputs(self.batch_norm_layer)
@@ -117,7 +149,6 @@ class TestBatchNorm(unittest.TestCase):
                                       progress_update=None),
             self.grad_func(self.inp), decimal=6)
          
-
     def test_batch_norm_positive_axis_fwd_prop(self):
         self.prepare_batch_norm_deeplift_model(axis=self.axis)
         deeplift_fprop_func = theano.function(
@@ -126,8 +157,7 @@ class TestBatchNorm(unittest.TestCase):
                                 allow_input_downcast=True)
         np.testing.assert_almost_equal(deeplift_fprop_func(self.inp),
                                    self.keras_batchnorm_fprop_func(self.inp),
-                                   decimal=6)
-         
+                                   decimal=5)
 
     def test_batch_norm_positive_axis_backprop(self):
         self.prepare_batch_norm_deeplift_model(axis=self.axis)
@@ -140,7 +170,6 @@ class TestBatchNorm(unittest.TestCase):
                 deeplift_multipliers_func(self.inp, np.zeros_like(self.inp)),
                 self.grad_func(self.inp), decimal=6)
          
-
     def test_batch_norm_negative_axis_fwd_prop(self):
         self.prepare_batch_norm_deeplift_model(axis=self.axis-4)
         deeplift_fprop_func = theano.function(
@@ -149,8 +178,7 @@ class TestBatchNorm(unittest.TestCase):
                                   allow_input_downcast=True)
         np.testing.assert_almost_equal(deeplift_fprop_func(self.inp),
                                     self.keras_batchnorm_fprop_func(self.inp),
-                                    decimal=6)
-         
+                                    decimal=5)
 
     def test_batch_norm_negative_axis_backprop(self):
         self.prepare_batch_norm_deeplift_model(axis=self.axis-4)
