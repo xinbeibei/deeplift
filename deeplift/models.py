@@ -15,7 +15,10 @@ from deeplift.blobs import ScoringMode
 import deeplift.backend as B
 
 
-FuncType = deeplift.util.enum(contribs="contribs", multipliers="multipliers")
+FuncType = deeplift.util.enum(
+    contribs="contribs",
+    multipliers="multipliers",
+    contribs_of_input_with_filter_refs="contribs_of_input_with_filter_refs")
 
 
 class Model(object):
@@ -25,6 +28,10 @@ class Model(object):
     def __init__(self):
         pass #at some point, I want to put in locking so that only
         #one function can be running at a time
+
+    def rebuild_fwd_pass_vars(self, target_layer):
+        target_layer.reset_built_fwd_pass_vars()
+        target_layer.build_fwd_pass_vars()
 
     def _get_func(self, find_scores_layer, 
                         target_layer,
@@ -37,6 +44,9 @@ class Model(object):
             output_symbolic_vars = find_scores_layer.get_target_contrib_vars()
         elif (func_type == FuncType.multipliers):
             output_symbolic_vars = find_scores_layer.get_mxts()
+        elif (func_type == FuncType.contribs_of_input_with_filter_refs):
+            output_symbolic_vars =\
+             find_scores_layer.get_contribs_of_inputs_with_filter_refs()
         else:
             raise RuntimeError("Unsupported func_type: "+func_type)
         if (slice_objects is not None):
@@ -75,6 +85,13 @@ class Model(object):
 
     def get_target_multipliers_func(self, *args, **kwargs):
         return self._get_func(*args, func_type=FuncType.multipliers, **kwargs)
+
+    def get_target_contribs_of_input_with_filter_ref_func(
+        self, *args, **kwargs):
+        return self._get_func(
+                *args,
+                func_type=FuncType.contribs_of_input_with_filter_refs,
+                **kwargs)
 
     def _set_scoring_mode_for_target_layer(self, target_layer):
         if (deeplift.util.is_type(target_layer,

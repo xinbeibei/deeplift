@@ -19,11 +19,15 @@ NonlinearMxtsMode = deeplift.util.enum(
                      DeepLIFT="DeepLIFT",
                      DeconvNet="DeconvNet",
                      GuidedBackprop="GuidedBackprop",
-                     GuidedBackpropDeepLIFT="GuidedBackpropDeepLIFT")
+                     GuidedBackpropDeepLIFT="GuidedBackpropDeepLIFT",
+                     PassThrough="PassThrough")
 DenseMxtsMode = deeplift.util.enum(
                     Linear="Linear",
                     PosOnly="PosOnly",
-                    Counterbalance="Counterbalance")
+                    RevealCancel="RevealCancel",
+                    #Redist is the newer name for Counterbalance
+                    Redist="Redist", Counterbalance="Counterbalance",
+                    RevealCancelRedist="RevealCancelRedist")
 ActivationNames = deeplift.util.enum(sigmoid="sigmoid",
                                      hard_sigmoid="hard_sigmoid",
                                      tanh="tanh",
@@ -46,6 +50,14 @@ class Blob(object):
         self._mxts_updated = False
         self._mxts_for_inputs_updated = False
         self.verbose=verbose
+
+    def reset_built_fwd_pass_vars(self):
+        self._built_fwd_pass_vars = False
+        self._output_layers = []
+        self._reset_built_fwd_pass_vars_for_inputs()
+
+    def _reset_built_fwd_pass_vars_for_inputs(self):
+        raise NotImplementedError()
 
     def reset_mxts_updated(self):
         for output_layer in self._output_layers:
@@ -215,6 +227,9 @@ class Input(Blob):
         self._diff_from_reference_vars = self._build_diff_from_reference_vars()
         self._mxts = B.zeros_like(self.get_activation_vars())
 
+    def _reset_built_fwd_pass_vars_for_inputs(self):
+        pass
+
 
 class Node(Blob):
 
@@ -302,8 +317,11 @@ class Node(Blob):
         raise NotImplementedError()
 
     def _build_reference_vars(self):
-        return self._build_activation_vars(
-                self._get_input_reference_vars())
+        if (hasattr(self, 'learned_reference')): 
+            return self.learned_reference
+        else:
+            return self._build_activation_vars(
+                    self._get_input_reference_vars())
 
     def _update_mxts_for_inputs(self):
         """
@@ -345,6 +363,9 @@ class SingleInputMixin(object):
     def _build_fwd_pass_vars_for_all_inputs(self):
         self.inputs.build_fwd_pass_vars(output_layer=self)
 
+    def _reset_built_fwd_pass_vars_for_inputs(self):
+        self.inputs.reset_built_fwd_pass_vars()
+
     def _call_function_on_blobs_within_inputs(self, function_name):
         """
             call function_name on self.inputs
@@ -375,8 +396,12 @@ class ListInputMixin(object):
                                     instance_var_name="self.inputs[0]")
     
     def _build_fwd_pass_vars_for_all_inputs(self):
-        return [an_input.build_fwd_pass_vars(output_layer=self)
-                for an_input in self.inputs]
+        for an_input in self.inputs:
+            an_input.build_fwd_pass_vars(output_layer=self)
+                
+    def _reset_built_fwd_pass_vars_for_inputs(self):
+        for an_input in self.inputs:
+            an_input.reset_built_fwd_pass_vars()
 
     def _call_function_on_blobs_within_inputs(self, function_name):
         return [eval('self.inputs['+str(i)+'].'+function_name+'()') for
@@ -471,36 +496,94 @@ class Dense(SingleInputMixin, OneDimOutputMixin, Node):
         return B.dot(input_act_vars, self.W) + self.b
 
     def _get_mxts_increments_for_inputs(self):
+        #re. counterbalance: this modification is only appropriate
+        #when the output is a relu. So when the output is not a relu,
+        #hackily set the mode back to Linear.
+        if (self.dense_mxts_mode in
+             [DenseMxtsMode.RevealCancel,
+              DenseMxtsMode.Redist,
+              DenseMxtsMode.Counterbalance,
+              DenseMxtsMode.RevealCancelRedist]):
+            if (len(self.get_output_layers())!=1 or
+                (type(self.get_output_layers()[0]).__name__!="ReLU")):
+                print("Dense layer does not have sole output of ReLU so"
+                      " cautiously reverting DenseMxtsMode from"
+                      " to Linear") 
+                self.dense_mxts_mode=DenseMxtsMode.Linear 
+
         if (self.dense_mxts_mode == DenseMxtsMode.PosOnly):
             return B.dot(self.get_mxts()*(self.get_mxts()>0.0),self.W.T)
-        elif (self.dense_mxts_mode == DenseMxtsMode.Counterbalance):
-            #self.W has dims input x output
+
+        elif (self.dense_mxts_mode in 
+              [DenseMxtsMode.RevealCancel,
+               DenseMxtsMode.Redist,
+               DenseMxtsMode.Counterbalance,
+               DenseMxtsMode.RevealCancelRedist]):
+            #self.W has dims input x output; W.T is output x input
+            #self._get_input_diff_from_reference_vars() has dims batch x input
             #fwd_contribs has dims batch x output x input
-            fwd_contribs = self._get_input_activation_vars()[:,None,:]\
+            fwd_contribs = self._get_input_diff_from_reference_vars()[:,None,:]\
                            *self.W.T[None,:,:] 
+
             #total_pos_contribs and total_neg_contribs have dim batch x output
             total_pos_contribs = B.sum(fwd_contribs*(fwd_contribs>0), axis=-1)
             total_neg_contribs = B.abs(B.sum(fwd_contribs*(fwd_contribs<0),
                                        axis=-1))
-            #if output diff-from-def is positive but there are some neg
-            #contribs, temper positive by some portion of the neg
-            #to_distribute has dims batch x output
-            to_distribute =\
-             B.maximum(
-                (total_neg_contribs*(total_neg_contribs < total_pos_contribs)
-                 - B.maximum(self.get_reference_vars(),0)),0.0)\
-                *(1.0-((total_neg_contribs)/
-                       pseudocount_near_zero(total_pos_contribs)))
-            #total_pos_contribs_new has dims batch x output
-            total_pos_contribs_new = total_pos_contribs - to_distribute
-            total_neg_contribs_new = total_neg_contribs - to_distribute
+            if (self.dense_mxts_mode==DenseMxtsMode.Redist or
+                self.dense_mxts_mode==DenseMxtsMode.Counterbalance):
+                #if output diff-from-def is positive but there are some neg
+                #contribs, temper positive by some portion of the neg
+                #to_distribute has dims batch x output
+                #neg_to_distribute is what dips below 0, accounting for ref
+                to_distribute = B.minimum(
+                    B.maximum(total_neg_contribs -
+                              B.maximum(self.get_reference_vars(),0.0),0.0),
+                    total_pos_contribs)/2.0
+
+                #total_pos_contribs_new has dims batch x output
+                total_pos_contribs_new = total_pos_contribs - to_distribute
+                total_neg_contribs_new = total_neg_contribs - to_distribute
+            elif (self.dense_mxts_mode in
+                   [DenseMxtsMode.RevealCancel,
+                    DenseMxtsMode.RevealCancelRedist]):
+
+                ##sanity check to see if we can implement the existing deeplift
+                #total_contribs = total_pos_contribs - total_neg_contribs
+                #effective_contribs = B.maximum(self.get_reference_vars() + total_contribs,0) -\
+                #                     B.maximum(self.get_reference_vars(),0)
+                #rescale = effective_contribs/total_contribs
+                # 
+                #return B.sum(self.get_mxts()[:,:,None]*self.W.T[None,:,:]*rescale[:,:,None], axis=1)
+
+                total_pos_contribs_new =\
+                 B.maximum(self.get_reference_vars()+total_pos_contribs,0)\
+                 -B.maximum(self.get_reference_vars(),0)
+                total_neg_contribs_new =\
+                 B.maximum(self.get_reference_vars()+total_pos_contribs,0)\
+                 -B.maximum(self.get_reference_vars()
+                            +total_pos_contribs-total_neg_contribs,0)
+                if (self.dense_mxts_mode==DenseMxtsMode.RevealCancelRedist):
+                    to_distribute = B.minimum(
+                        B.maximum(total_neg_contribs_new -
+                                  B.maximum(self.get_reference_vars(),0.0),0.0),
+                        total_pos_contribs_new)/2.0
+                    total_pos_contribs_new = total_pos_contribs_new - to_distribute
+                    total_neg_contribs_new = total_neg_contribs_new - to_distribute
+            else:
+                raise RuntimeError("Unsupported dense_mxts_mode: "
+                                   +str(self.dense_mxts_mode))
             #positive_rescale has dims batch x output
-            positive_rescale = total_pos_contribs_new/pseudocount_near_zero(total_pos_contribs)
-            negative_rescale = total_neg_contribs_new/pseudocount_near_zero(total_neg_contribs)
+            positive_rescale = total_pos_contribs_new/\
+                                pseudocount_near_zero(total_pos_contribs)
+            negative_rescale = total_neg_contribs_new/\
+                                pseudocount_near_zero(total_neg_contribs)
             #new_Wt has dims batch x output x input
-            new_Wt = self.W.T[None,:,:]*(fwd_contribs>0)*positive_rescale[:,:,None] 
-            new_Wt += self.W.T[None,:,:]*(fwd_contribs<0)*negative_rescale[:,:,None] 
-            return B.sum(self.get_mxts()[:,:,None]*new_Wt[:,:,:],axis=1)
+            new_Wt = self.W.T[None,:,:]*\
+                      (fwd_contribs>0)*positive_rescale[:,:,None] 
+            new_Wt += self.W.T[None,:,:]*\
+                       (fwd_contribs<0)*negative_rescale[:,:,None] 
+            return B.sum(self.get_mxts()[:,:,None]*new_Wt[:,:,:], axis=1)
+
         elif (self.dense_mxts_mode == DenseMxtsMode.Linear):
             return B.dot(self.get_mxts(),self.W.T)
         else:
