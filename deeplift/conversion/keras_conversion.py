@@ -476,8 +476,11 @@ def load_keras_model(weights, yaml,
                      name_of_conv_layer_to_normalise=None): 
     #At the time of writing, I don't actually use this because
     #I do the converion in convert_sequential_model to the deeplift_layer
-    from keras.models import model_from_yaml                                    
-    model = model_from_yaml(open(yaml).read()) 
+    from keras.legacy.models import *
+    #from keras.models import model_from_yaml
+    model_config=yaml.load(yaml_string)
+    model=Graph.from_config(model_config) 
+    #model = model_from_yaml(open(yaml).read()) 
     model.load_weights(weights) 
     if (normalise_conv_for_one_hot_encoded_input):
         mean_normalise_first_conv_layer_weights(
