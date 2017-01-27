@@ -11,7 +11,6 @@ from deeplift.blobs import NonlinearMxtsMode,\
 import deeplift.util  
 from deeplift.backend import PoolMode, BorderMode
 import numpy as np
-import pdb 
 
 KerasKeys = deeplift.util.enum(name='name', activation='activation',
                   subsample='subsample', subsample_length='subsample_length',
@@ -313,28 +312,7 @@ def layer_name_to_conversion_function(layer_name):
         'dropout': dropout_conversion, 
         'activation': activation_conversion, 
         'prelu': prelu_conversion,
-        'sequential': sequential_container_conversion,
-        ####custom####THESE NEED TO BE DELETED ONCE I PROPERLY NAME THE LAYERS IN MY MODEL FOR TRAINIGN#### 
-        'conv1':conv2d_conversion,
-        'conv2':conv2d_conversion,
-        'conv3':conv2d_conversion,
-        'fc_1':dense_conversion,
-        'fc_act1':prelu_conversion,
-        'fc_act2':prelu_conversion,
-        'fc_2':dense_conversion,
-        'fc_3':dense_conversion,
-        'conv1_act':activation_conversion,
-        'conv2_act':activation_conversion,
-        'conv3_act':activation_conversion,
-        'avg_pool1':avgpool2d_conversion,
-        'avg_pool2':avgpool2d_conversion,
-        'avg_pool3':avgpool2d_conversion,
-        'batch_norm2':batchnorm_conversion,
-        'batch_norm3':batchnorm_conversion,
-        'dropout1':dropout_conversion,
-        'dropout2':dropout_conversion,
-        'output_act':activation_conversion,
-        'default_output_mode_name':activation_conversion
+        'sequential': sequential_container_conversion
     }
 
     # lowercase to create resistance to capitalization changes
@@ -384,7 +362,6 @@ def convert_graph_model(model,
     name_to_blob = OrderedDict()
     keras_layer_to_deeplift_blobs = OrderedDict() 
     keras_non_input_layers = []
-    #pdb.set_trace() 
     #convert the inputs
     for keras_input_layer_name in model._graph_inputs:
         keras_input_layer=model._graph_inputs[keras_input_layer_name]
@@ -399,7 +376,8 @@ def convert_graph_model(model,
         keras_layer_to_deeplift_blobs[id(keras_input_layer)] =\
                                                          [deeplift_input_layer]
     #convert the nodes/outputs 
-    for layer_name, layer in list(model._graph_nodes.items()):
+    for user_supplied_layer_name, layer in list(model._graph_nodes.items()):
+        layer_name=type(layer).__name__
         conversion_function = layer_name_to_conversion_function(
                                layer.get_config()[KerasKeys.name])
         keras_non_input_layers.append(layer)
