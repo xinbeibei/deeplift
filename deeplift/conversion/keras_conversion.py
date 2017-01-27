@@ -11,7 +11,7 @@ from deeplift.blobs import NonlinearMxtsMode,\
 import deeplift.util  
 from deeplift.backend import PoolMode, BorderMode
 import numpy as np
-
+import pdb 
 
 KerasKeys = deeplift.util.enum(name='name', activation='activation',
                   subsample='subsample', subsample_length='subsample_length',
@@ -313,7 +313,28 @@ def layer_name_to_conversion_function(layer_name):
         'dropout': dropout_conversion, 
         'activation': activation_conversion, 
         'prelu': prelu_conversion,
-        'sequential': sequential_container_conversion
+        'sequential': sequential_container_conversion,
+        ####custom####
+        'conv1':conv2d_conversion,
+        'conv2':conv2d_conversion,
+        'conv3':conv2d_conversion,
+        'fc_1':dense_conversion,
+        'fc_act1':prelu_conversion,
+        'fc_act2':prelu_conversion,
+        'fc_2':dense_conversion,
+        'fc_3':dense_conversion,
+        'conv1_act':activation_conversion,
+        'conv2_act':activation_conversion,
+        'conv3_act':activation_conversion,
+        'avg_pool1':avgpool2d_conversion,
+        'avg_pool2':avgpool2d_conversion,
+        'avg_pool3':avgpool2d_conversion,
+        'batch_norm2':batchnorm_conversion,
+        'batch_norm3':batchnorm_conversion,
+        'dropout1':dropout_conversion,
+        'dropout2':dropout_conversion,
+        'output_act':activation_conversion,
+        'default_output_mode_name':activation_conversion
     }
 
     # lowercase to create resistance to capitalization changes
@@ -363,23 +384,22 @@ def convert_graph_model(model,
     name_to_blob = OrderedDict()
     keras_layer_to_deeplift_blobs = OrderedDict() 
     keras_non_input_layers = []
-
+    #pdb.set_trace() 
     #convert the inputs
-    for keras_input_layer_name in model.inputs:
-        keras_input_layer = model.inputs[keras_input_layer_name]
-        input_shape = keras_input_layer.get_config()['input_shape']
+    for keras_input_layer_name in model._graph_inputs:
+        keras_input_layer=model._graph_inputs[keras_input_layer_name]
+        input_shape = keras_input_layer.get_config()['batch_input_shape']
         if (input_shape[0] is not None):
             input_shape = [None]+[x for x in input_shape]
         assert input_shape[0] is None #for the batch axis
         deeplift_input_layer =\
-         blobs.Input(shape=input_shape, num_dims=None,
+        blobs.Input(shape=input_shape, num_dims=None,
                            name=keras_input_layer_name)
         name_to_blob[keras_input_layer_name] = deeplift_input_layer
         keras_layer_to_deeplift_blobs[id(keras_input_layer)] =\
                                                          [deeplift_input_layer]
-    
     #convert the nodes/outputs 
-    for layer_name, layer in list(model.nodes.items()):
+    for layer_name, layer in list(model._graph_nodes.items()):
         conversion_function = layer_name_to_conversion_function(
                                layer.get_config()[KerasKeys.name])
         keras_non_input_layers.append(layer)
@@ -397,26 +417,34 @@ def convert_graph_model(model,
     #connect any remaining things not connected to their inputs 
     for keras_non_input_layer in keras_non_input_layers:
         deeplift_layers =\
-         keras_layer_to_deeplift_blobs[id(keras_non_input_layer)]
+        keras_layer_to_deeplift_blobs[id(keras_non_input_layer)]
         previous_keras_layer = get_previous_layer(keras_non_input_layer)
         previous_deeplift_layer =\
-         keras_layer_to_deeplift_blobs[id(previous_keras_layer)][-1]
+        keras_layer_to_deeplift_blobs[id(previous_keras_layer)][-1]
         deeplift.util.apply_softmax_normalization_if_needed(
                                               deeplift_layers[0],
                                               previous_deeplift_layer)
         deeplift_layers[0].set_inputs(previous_deeplift_layer) 
 
     if (auto_build_outputs):
-        for layer in model.outputs.values():
+        for layer in model._graph_outputs.values():
             layer_to_build = keras_layer_to_deeplift_blobs[id(layer)][-1]
-            layer_to_build.build_fwd_pass_vars() 
+            layer_to_build.build_fwd_pass_vars()
     return models.GraphModel(name_to_blob=name_to_blob,
-                             input_layer_names=model.inputs.keys())
+                             input_layer_names=model._graph_inputs.keys())
 
 
 def get_previous_layer(keras_layer):
     if (hasattr(keras_layer,'previous')):
         return keras_layer.previous
+    elif(hasattr(keras_layer,'inbound_nodes')):
+        if len(keras_layer.inbound_nodes)>1:
+            raise NotImplementedError("The keras layer:"+
+                                      str(keras_layer.name)+
+                                      " has "+
+                                      str(len(keras_layer.inbound_nodes))+
+                                      "inbound nodes, but only a single inbound node can currently be handled")
+        return keras_layer.inbound_nodes[0].inbound_layers[0]
     elif (type(keras_layer).__name__ == 'Sequential'):
         return keras_layer.layers[0].previous
     else:
@@ -478,8 +506,7 @@ def load_keras_model(weights, yaml,
     #I do the converion in convert_sequential_model to the deeplift_layer
     from keras.legacy.models import *
     #from keras.models import model_from_yaml
-    model_config=yaml.load(yaml_string)
-    model=Graph.from_config(model_config) 
+    model=Graph.from_config(yaml) 
     #model = model_from_yaml(open(yaml).read()) 
     model.load_weights(weights) 
     if (normalise_conv_for_one_hot_encoded_input):
