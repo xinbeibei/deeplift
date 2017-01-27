@@ -314,7 +314,7 @@ def layer_name_to_conversion_function(layer_name):
         'activation': activation_conversion, 
         'prelu': prelu_conversion,
         'sequential': sequential_container_conversion,
-        ####custom####
+        ####custom####THESE NEED TO BE DELETED ONCE I PROPERLY NAME THE LAYERS IN MY MODEL FOR TRAINIGN#### 
         'conv1':conv2d_conversion,
         'conv2':conv2d_conversion,
         'conv3':conv2d_conversion,
