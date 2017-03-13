@@ -378,8 +378,7 @@ def convert_graph_model(model,
     #convert the nodes/outputs 
     for user_supplied_layer_name, layer in list(model._graph_nodes.items()):
         layer_name=type(layer).__name__
-        conversion_function = layer_name_to_conversion_function(
-                               layer.get_config()[KerasKeys.name])
+        conversion_function = layer_name_to_conversion_function(layer_name)
         keras_non_input_layers.append(layer)
         deeplift_layers = conversion_function(
                                  layer=layer, name=layer_name,
